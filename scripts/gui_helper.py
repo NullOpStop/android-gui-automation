@@ -216,7 +216,7 @@ def _text_size(draw, text, font):
 
 # --- ocr -------------------------------------------------------------------
 
-def cmd_ocr(_args):
+def cmd_ocr(_args, print_json=True):
     try:
         from PIL import Image
         import pytesseract
@@ -295,7 +295,25 @@ def cmd_ocr(_args):
                 "conf": round(sum(w["conf"] for w in group) / len(group), 1),
             })
 
-    print(json.dumps(results, indent=2))
+    if print_json:
+        print(json.dumps(results, indent=2))
+    return results
+
+
+# --- tap_text --------------------------------------------------------------
+
+def cmd_tap_text(args):
+    results = cmd_ocr(None, print_json=False)
+    target = args.text.lower()
+    matches = [r for r in results if target in r["text"].lower()]
+    if not matches:
+        fail(f"Text '{args.text}' not found on screen.")
+    best = sorted(matches, key=lambda m: m["conf"], reverse=True)[0]
+    cx, cy = best["center"]["x"], best["center"]["y"]
+    proc = run_rish(f"input tap {cx} {cy}")
+    if proc.returncode != 0:
+        fail(f"input tap failed: {stderr_text(proc) or 'unknown error'}")
+    print(json.dumps({"status": "ok", "action": "tap_text", "matched_text": best["text"], "x": cx, "y": cy}))
 
 
 # --- tap -------------------------------------------------------------------
@@ -307,6 +325,28 @@ def cmd_tap(args):
     if proc.returncode != 0:
         fail(f"input tap failed: {stderr_text(proc) or 'unknown error'}")
     print(json.dumps({"status": "ok", "action": "tap", "x": args.x, "y": args.y}))
+
+
+# --- nav -------------------------------------------------------------------
+
+def cmd_nav(args):
+    keycodes = {
+        "home": 3,
+        "back": 4,
+        "recents": 187,
+        "power": 26,
+        "enter": 66,
+        "tab": 61,
+    }
+    action = args.action.lower()
+    if action not in keycodes:
+        fail(f"Unknown nav action '{action}'. Available: {', '.join(keycodes.keys())}")
+    
+    proc = run_rish(f"input keyevent {keycodes[action]}")
+    if proc.returncode != 0:
+        fail(f"nav {action} failed: {stderr_text(proc) or 'unknown error'}")
+    
+    print(json.dumps({"status": "ok", "action": "nav", "target": action, "keycode": keycodes[action]}))
 
 
 # --- error handling --------------------------------------------------------
@@ -327,13 +367,20 @@ def main():
     sub.add_parser("dump", help="Dump clickable UI elements as JSON.")
     sub.add_parser("grid", help="Screenshot with a 10x10 labeled grid overlay.")
     sub.add_parser("ocr", help="OCR the screen to find text bounds.")
+    
+    p_nav = sub.add_parser("nav", help="Trigger system navigation (home, back, recents, etc.)")
+    p_nav.add_argument("action", type=str, help="Action to perform (home, back, recents, power, enter, tab)")
+
     p_tap = sub.add_parser("tap", help="Tap at screen coordinates.")
     p_tap.add_argument("x", type=int)
     p_tap.add_argument("y", type=int)
 
+    p_tap_text = sub.add_parser("tap_text", help="Tap on text found via OCR.")
+    p_tap_text.add_argument("text", type=str, help="The text to tap")
+
     args = parser.parse_args()
     try:
-        {"dump": cmd_dump, "grid": cmd_grid, "ocr": cmd_ocr, "tap": cmd_tap}[args.command](args)
+        {"dump": cmd_dump, "grid": cmd_grid, "ocr": cmd_ocr, "tap": cmd_tap, "nav": cmd_nav, "tap_text": cmd_tap_text}[args.command](args)
     except RuntimeError as exc:
         fail(str(exc))
 
