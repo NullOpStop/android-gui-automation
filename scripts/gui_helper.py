@@ -213,6 +213,91 @@ def _text_size(draw, text, font):
     return draw.textsize(text, font=font)  # Pillow < 8
 
 
+
+# --- ocr -------------------------------------------------------------------
+
+def cmd_ocr(_args):
+    try:
+        from PIL import Image
+        import pytesseract
+        from pytesseract import Output
+    except ImportError:
+        fail("Pillow and pytesseract are required for 'ocr'. Install with: pip install Pillow pytesseract")
+
+    remote_png = "/sdcard/screen_temp.png"
+    proc = run_rish(f"screencap -p {remote_png}")
+    if proc.returncode != 0:
+        fail(f"screencap failed: {stderr_text(proc)}")
+        
+    try:
+        with open(remote_png, "rb") as fh:
+            data = fh.read()
+    except Exception as e:
+        fail(f"Could not read {remote_png}: {e}")
+
+    img = Image.open(io.BytesIO(data))
+    
+    # Use PSM 11 (Sparse text) which is good for UIs
+    data_ocr = pytesseract.image_to_data(img, output_type=Output.DICT, config="--psm 11")
+
+    # Bucket words by their layout line, preserving reading order.
+    lines = {}
+    n = len(data_ocr["text"])
+    min_conf = 40
+    for i in range(n):
+        text = data_ocr["text"][i].strip()
+        if not text:
+            continue
+        try:
+            conf = float(data_ocr["conf"][i])
+        except (ValueError, TypeError):
+            conf = -1
+        if conf < min_conf:
+            continue
+
+        key = (data_ocr["block_num"][i], data_ocr["par_num"][i], data_ocr["line_num"][i])
+        lines.setdefault(key, []).append({
+            "text": text,
+            "left": data_ocr["left"][i],
+            "top": data_ocr["top"][i],
+            "right": data_ocr["left"][i] + data_ocr["width"][i],
+            "bottom": data_ocr["top"][i] + data_ocr["height"][i],
+            "conf": conf,
+            "word_num": data_ocr["word_num"][i],
+        })
+
+    results = []
+    max_gap = None
+    for key in sorted(lines.keys()):
+        words = sorted(lines[key], key=lambda w: w["word_num"])
+
+        groups, current = [], [words[0]]
+        for prev, cur in zip(words, words[1:]):
+            gap = cur["left"] - prev["right"]
+            height = prev["bottom"] - prev["top"]
+            limit = max_gap if max_gap is not None else height * 1.5
+            if gap > limit:
+                groups.append(current)
+                current = [cur]
+            else:
+                current.append(cur)
+        groups.append(current)
+
+        for group in groups:
+            left = min(w["left"] for w in group)
+            top = min(w["top"] for w in group)
+            right = max(w["right"] for w in group)
+            bottom = max(w["bottom"] for w in group)
+            results.append({
+                "text": " ".join(w["text"] for w in group),
+                "bounds": [left, top, right, bottom],
+                "center": {"x": left + (right - left) // 2, "y": top + (bottom - top) // 2},
+                "conf": round(sum(w["conf"] for w in group) / len(group), 1),
+            })
+
+    print(json.dumps(results, indent=2))
+
+
 # --- tap -------------------------------------------------------------------
 
 def cmd_tap(args):
@@ -241,13 +326,14 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("dump", help="Dump clickable UI elements as JSON.")
     sub.add_parser("grid", help="Screenshot with a 10x10 labeled grid overlay.")
+    sub.add_parser("ocr", help="OCR the screen to find text bounds.")
     p_tap = sub.add_parser("tap", help="Tap at screen coordinates.")
     p_tap.add_argument("x", type=int)
     p_tap.add_argument("y", type=int)
 
     args = parser.parse_args()
     try:
-        {"dump": cmd_dump, "grid": cmd_grid, "tap": cmd_tap}[args.command](args)
+        {"dump": cmd_dump, "grid": cmd_grid, "ocr": cmd_ocr, "tap": cmd_tap}[args.command](args)
     except RuntimeError as exc:
         fail(str(exc))
 
